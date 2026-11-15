@@ -244,8 +244,8 @@ final class DownloadManager: ObservableObject {
         let worker = HLSWorker(options: HLSWorker.Options(
             referer: record.pageURLString,
             userAgent: context.userAgent.isEmpty ? Self.userAgent : context.userAgent,
-            // 3 路并发：实测 4 路时 CDN 会重置连接（Cloudflare 那一层），3 路稳定
-            concurrency: 3,
+            // 8 路起步 + 自适应：成功就加到 12，被 CDN 重置就退档，最低 3
+            concurrency: 8,
             cookies: context.cookies
         ))
 
