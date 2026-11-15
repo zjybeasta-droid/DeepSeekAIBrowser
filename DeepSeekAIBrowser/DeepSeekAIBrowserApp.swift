@@ -34,15 +34,22 @@ final class AppModel: ObservableObject {
     }()
 
     init() {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        dlog("=== 启动 AI浏览器 \(version) (\(build)) / \(UIDevice.current.systemName) \(UIDevice.current.systemVersion) ===")
+
         profile = BehaviorProfile.load()
         apiKey = KeychainStore.load(service: "DeepSeekAIBrowser", account: "api-key") ?? ""
+        dlog("API Key: \(apiKey.isEmpty ? "未设置" : "已设置(\(apiKey.count) 字符)")")
 
         // 嗅探脚本必须在第一次 load 之前注入，否则首屏的媒体请求会漏掉。
         browser.attachSniffer(sniffer)
+        dlog("嗅探器已挂载")
         browser.onDownloadRequest = { [weak self] url, page in
             self?.downloads.enqueue(urlString: url.absoluteString, pageURLString: page)
         }
         downloads.resumeInterrupted()
+        dlog("下载索引恢复完成，任务数 \(downloads.records.count)")
     }
 
     func saveSettings() {

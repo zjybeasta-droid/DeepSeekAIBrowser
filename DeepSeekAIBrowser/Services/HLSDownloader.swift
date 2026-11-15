@@ -86,13 +86,21 @@ struct HLSWorker {
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
 
         progress(0.02, "读取播放列表…")
+        dlog("HLS 开始 playlist=\(playlistURL.absoluteString)")
         let media = try await resolveMediaPlaylist(startingAt: playlistURL)
 
-        guard media.endList else { throw HLSError.liveStream }
-        guard !media.segments.isEmpty else { throw HLSError.empty }
+        guard media.endList else {
+            dlog("✗ 没有 EXT-X-ENDLIST，判定为直播流")
+            throw HLSError.liveStream
+        }
+        guard !media.segments.isEmpty else {
+            dlog("✗ 播放列表解析出 0 个分片")
+            throw HLSError.empty
+        }
         guard media.segments.count <= options.maxSegments else {
             throw HLSError.unsupported("分片数量 \(media.segments.count) 超出上限")
         }
+        dlog("播放列表 OK: \(media.segments.count) 个分片, initMap=\(media.initMap == nil ? "无" : "有")")
 
         var initData: Data?
         if let map = media.initMap {
@@ -150,12 +158,15 @@ struct HLSWorker {
 
     private func resolveMediaPlaylist(startingAt url: URL) async throws -> MediaPlaylist {
         var current = url
-        for _ in 0..<4 {
+        for level in 0..<4 {
             let text = try await fetchText(current)
             if let variant = Self.bestVariant(in: text, baseURL: current) {
+                dlog("  第\(level + 1)层是主列表，选最高码率 → \(variant.absoluteString)")
                 current = variant
                 continue
             }
+            let preview = text.components(separatedBy: .newlines).prefix(3).joined(separator: " | ")
+            dlog("  第\(level + 1)层按媒体列表解析，开头: \(preview)")
             return try Self.parseMediaPlaylist(text, baseURL: current)
         }
         throw HLSError.badPlaylist("嵌套层级过深")
@@ -304,13 +315,24 @@ struct HLSWorker {
     /// 这里再抢一个时钟，保证任务不会无限停在"读取播放列表"。
     private func fetchData(_ url: URL, timeout: UInt64 = 20) async throws -> Data {
         let request = makeRequest(url)
+        let referer = options.referer.isEmpty ? "(空)" : options.referer
+        dlog("GET \(url.absoluteString)")
+        dlog("    Referer=\(referer)")
+
         return try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask { [session] in
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
+                    dlog("    ✗ 没有 HTTP 响应")
                     throw HLSError.badPlaylist("服务器没有返回 HTTP 响应")
                 }
+                let mime = http.value(forHTTPHeaderField: "Content-Type") ?? "(无)"
+                dlog("    ← HTTP \(http.statusCode)  \(data.count) B  \(mime)")
+
                 guard (200..<300).contains(http.statusCode) else {
+                    // 把响应体开头打进日志：403 时通常是一段 HTML 说明，能看出是防盗链还是过期
+                    let head = String(data: data.prefix(200), encoding: .utf8) ?? ""
+                    dlog("    ✗ 响应体开头: \(head.replacingOccurrences(of: "\n", with: " "))")
                     let tail = url.absoluteString.count > 90 ? String(url.absoluteString.suffix(90)) : url.absoluteString
                     throw HLSError.unsupported("HTTP \(http.statusCode)（\(tail)）")
                 }
@@ -318,6 +340,7 @@ struct HLSWorker {
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: timeout * 1_000_000_000)
+                dlog("    ✗ 超时 \(timeout)s")
                 throw HLSError.unsupported("请求超时 \(timeout)s，可能被 CDN 拦了或地址已过期")
             }
             guard let first = try await group.next() else {

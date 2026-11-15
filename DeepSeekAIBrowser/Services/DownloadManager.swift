@@ -109,6 +109,7 @@ final class DownloadManager: ObservableObject {
         )
         records.insert(record, at: 0)
         saveIndex()
+        dlog("enqueue kind=\(kind) name=\(name) page=\(pageURLString) url=\(urlString)")
         start(record.id)
         return record.id
     }
@@ -168,6 +169,7 @@ final class DownloadManager: ObservableObject {
     private func run(id: UUID) async {
         defer { runningTasks[id] = nil }
         guard let record = records.first(where: { $0.id == id }) else { return }
+        dlog("run 开始 task=\(id.uuidString.prefix(8)) kind=\(record.kind) url=\(record.urlString)")
 
         do {
             let produced: URL
@@ -185,6 +187,7 @@ final class DownloadManager: ObservableObject {
             try? FileManager.default.removeItem(at: workDirectory(for: id))
 
             let relative = destination.path.replacingOccurrences(of: documentsDirectory.path + "/", with: "")
+            dlog("run 完成 → \(destination.lastPathComponent)")
             update(id) {
                 $0.state = .finished
                 $0.progress = 1
@@ -193,9 +196,11 @@ final class DownloadManager: ObservableObject {
             }
             saveIndex()
         } catch is CancellationError {
+            dlog("run 取消 task=\(id.uuidString.prefix(8))")
             update(id) { $0.state = .queued; $0.message = "已暂停" }
             saveIndex()
         } catch {
+            dlog("run 失败 task=\(id.uuidString.prefix(8)) err=\(error.localizedDescription)")
             update(id) {
                 $0.state = .failed
                 $0.message = error.localizedDescription

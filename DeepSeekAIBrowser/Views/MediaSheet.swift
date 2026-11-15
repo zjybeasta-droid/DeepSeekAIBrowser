@@ -3,6 +3,7 @@ import SwiftUI
 struct MediaSheet: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var showDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -62,9 +63,19 @@ struct MediaSheet: View {
             .navigationTitle("视频与下载")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showDiagnostics = true
+                    } label: {
+                        Label("诊断", systemImage: "stethoscope")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
                 }
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                DiagnosticsSheet().environmentObject(app)
             }
         }
     }

@@ -185,6 +185,7 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
 
         if knownURLs.contains(candidate.url) { return }
         knownURLs.insert(candidate.url)
+        dlog("嗅探命中 [\(candidate.kind)/\(candidate.source)] \(candidate.url)")
         pending.append(candidate)
         scheduleFlush()
     }

@@ -123,12 +123,29 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
         _ = try await evaluate(script)
     }
 
-    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { isLoading = true }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { isLoading = false; currentURL = webView.url?.absoluteString ?? "" }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { isLoading = false; lastError = error.localizedDescription }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        isLoading = true
+        dlog("导航开始 \(webView.url?.absoluteString ?? "?")")
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        isLoading = false
+        currentURL = webView.url?.absoluteString ?? ""
+        dlog("页面加载完成 \(currentURL)")
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        isLoading = false
+        lastError = error.localizedDescription
+        dlog("✗ 页面加载失败 \(error.localizedDescription)")
+    }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .download)
+        let canShow = navigationResponse.canShowMIMEType
+        if !canShow {
+            dlog("响应无法直接显示，转为下载 \(navigationResponse.response.url?.absoluteString ?? "?")")
+        }
+        decisionHandler(canShow ? .allow : .download)
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) { download.delegate = self }
