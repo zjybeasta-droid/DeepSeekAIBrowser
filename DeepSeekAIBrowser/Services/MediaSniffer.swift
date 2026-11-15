@@ -98,6 +98,30 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
                 page: location.href
               });
             } catch (e) {}
+
+            // 预热：首播慢的一大半时间花在 DNS + TCP + TLS 握手上。
+            // 这里提前把连接建好，播放器真正请求分片时直接复用。
+            warm(abs, kindOf(abs));
+          }
+
+          var warmed = {};
+          function warm(url, kind) {
+            try {
+              if (kind !== 'hls') { return; }
+              var origin;
+              try { origin = new URL(url, location.href).origin; } catch (e) { return; }
+              if (warmed[origin]) { return; }
+              warmed[origin] = 1;
+
+              var link = document.createElement('link');
+              link.rel = 'preconnect';
+              link.href = origin;
+              link.crossOrigin = 'anonymous';
+              (document.head || document.documentElement).appendChild(link);
+
+              // 顺手把播放列表拉进缓存，播放器再要时就是命中
+              try { fetch(url, { credentials: 'include' }).catch(function () {}); } catch (e) {}
+            } catch (e) {}
           }
 
           // 1) 已经发生过的网络请求。最可靠的一路：
@@ -141,6 +165,11 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
                 var el = els[i];
                 post(el.src, 'dom');
                 post(el.currentSrc, 'dom');
+                // 很多站的播放器默认 preload=none，用户点了才去拉。
+                // 改成 auto 会让首帧来得更快。
+                if (el.tagName === 'VIDEO' && el.preload !== 'auto') {
+                  try { el.preload = 'auto'; } catch (e) {}
+                }
               }
             } catch (e) {}
           }

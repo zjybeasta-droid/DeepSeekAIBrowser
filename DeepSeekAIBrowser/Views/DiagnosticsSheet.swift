@@ -22,6 +22,7 @@ struct DiagnosticsSheet: View {
         嗅探开关: \(app.sniffer.isEnabled ? "开" : "关")
         媒体候选: \(app.sniffer.candidates.count)
         下载任务: \(app.downloads.records.count)
+        广告拦截: \(app.blocker.status)
         """
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 @MainActor
 final class DownloadManager: ObservableObject {
@@ -84,6 +85,38 @@ final class DownloadManager: ObservableObject {
     /// 页面切换或重新加载后要丢弃缓存，否则会拿着旧 Cookie 去请求
     func invalidateContext() {
         cachedContext = nil
+    }
+
+    // MARK: - 前台保活
+
+    private var backgroundTokens: [UUID: UIBackgroundTaskIdentifier] = [:]
+
+    /// 申请后台执行时间。iOS 给的是有限额度（约 30 秒，大版本间有差异），
+    /// 足够撑过"切出去回个消息"这类短暂离开；长时间挂后台要靠后台会话，那是另一套改造。
+    private func beginBackgroundAssertion(id: UUID) {
+        let token = UIApplication.shared.beginBackgroundTask(withName: "download-\(id.uuidString.prefix(8))") { [weak self] in
+            Task { @MainActor in
+                dlog("⚠️ 后台执行时间用尽，任务暂停")
+                self?.endBackgroundAssertion(id: id)
+            }
+        }
+        backgroundTokens[id] = token
+    }
+
+    private func endBackgroundAssertion(id: UUID) {
+        guard let token = backgroundTokens.removeValue(forKey: id), token != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(token)
+    }
+
+    /// 有任务在跑就不让屏幕自动锁。
+    /// 这一条比后台任务更实用：熄屏是 iOS 挂起进程最常见的原因，
+    /// 屏幕不灭 + 应用在前台，下载就不会被打断。
+    private func updateIdleTimer() {
+        let running = records.contains { $0.state == .running }
+        if UIApplication.shared.isIdleTimerDisabled != running {
+            UIApplication.shared.isIdleTimerDisabled = running
+            dlog(running ? "屏幕常亮：开（有任务在跑）" : "屏幕常亮：关")
+        }
     }
 
     // MARK: - 生命周期
@@ -194,6 +227,11 @@ final class DownloadManager: ObservableObject {
         defer { runningTasks[id] = nil }
         guard let record = records.first(where: { $0.id == id }) else { return }
         dlog("run 开始 task=\(id.uuidString.prefix(8)) kind=\(record.kind) url=\(record.urlString)")
+
+        beginBackgroundAssertion(id: id)
+        defer { endBackgroundAssertion(id: id) }
+        updateIdleTimer()
+        defer { updateIdleTimer() }
 
         do {
             let produced: URL
