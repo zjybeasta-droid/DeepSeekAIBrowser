@@ -1,10 +1,16 @@
 import SwiftUI
 
 struct ContentView: View {
+    private enum ActiveSheet: String, Identifiable {
+        case settings
+        case media
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject private var app: AppModel
     @State private var address = "https://www.example.com"
     @State private var task = ""
-    @State private var showSettings = false
+    @State private var activeSheet: ActiveSheet?
 
     var body: some View {
         NavigationStack {
@@ -17,7 +23,7 @@ struct ContentView: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                     Button("打开") { app.browser.load(address) }
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    Button { activeSheet = .settings } label: { Image(systemName: "gearshape") }
                 }
                 .padding(8)
 
@@ -51,17 +57,22 @@ struct ContentView: View {
                 }
                 .padding(8)
 
-                HStack {
+                HStack(spacing: 8) {
                     Button("清理页面") { Task { await app.browser.cleanPageLocally() } }
-                    Button("识别视频") { Task { await app.agent.run(task: "识别当前网页中的主视频和可用的官方下载入口，先不要下载。") } }
-                    Button("下载") { Task { await app.agent.run(task: "在当前网页中找到用户可访问的视频下载入口并开始下载。") } }
+                    Button("视频（\(app.sniffer.candidates.count)）") { activeSheet = .media }
+                    Button("下载") { Task { await app.smartDownload() } }
                 }
                 .buttonStyle(.bordered)
                 .padding(.bottom, 8)
             }
             .navigationTitle("AI 浏览器")
             .navigationBarTitleDisplayMode(.inline)
-            .sheet(isPresented: $showSettings) { SettingsView().environmentObject(app) }
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .settings: SettingsView().environmentObject(app)
+                case .media: MediaSheet().environmentObject(app)
+                }
+            }
             .task {
                 await app.blocker.compile()
                 app.blocker.attach(to: app.browser.webView)

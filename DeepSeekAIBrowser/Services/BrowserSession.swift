@@ -8,6 +8,9 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
     @Published var isLoading = false
     @Published var lastError = ""
 
+    /// AI 返回 download 动作时，交给下载管理器处理；不要让 webView 去导航。
+    var onDownloadRequest: ((URL, String) -> Void)?
+
     override init() {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
@@ -24,6 +27,14 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
         if !candidate.contains("://") { candidate = "https://" + candidate }
         guard let url = URL(string: candidate) else { lastError = "网址格式不正确"; return }
         webView.load(URLRequest(url: url))
+    }
+
+    /// 必须在第一次 load 之前调用，否则首屏的媒体请求会漏掉。
+    func attachSniffer(_ sniffer: MediaSniffer) {
+        let controller = webView.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: MediaSniffer.handlerName)
+        controller.add(sniffer, name: MediaSniffer.handlerName)
+        controller.addUserScript(sniffer.makeUserScript())
     }
 
     func reload() { webView.reload() }
@@ -91,7 +102,7 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
                 _ = try await evaluate("document.querySelector(\(value))?.style.setProperty('display','none','important');")
             }
         case "close_popup": await cleanPageLocally()
-        case "download": if let url = action.url, let target = URL(string: url) { webView.load(URLRequest(url: target)) }
+        case "download": if let url = action.url, let target = URL(string: url) { onDownloadRequest?(target, currentURL) }
         case "wait": try await Task.sleep(for: .milliseconds(650))
         case "finish": break
         default: break
