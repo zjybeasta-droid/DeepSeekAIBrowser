@@ -48,6 +48,12 @@ final class AppModel: ObservableObject {
         browser.onDownloadRequest = { [weak self] url, page in
             self?.downloads.enqueue(urlString: url.absoluteString, pageURLString: page)
         }
+        // 让下载器能用 WebView 的真实 UA 和 Cookie。
+        // 不搬这两样，带防盗链的 CDN 必定 403（WKWebView 与 URLSession 的 Cookie 存储不通）。
+        downloads.contextProvider = { [weak self] in
+            guard let self else { return (DownloadManager.userAgent, []) }
+            return await self.browser.downloadContext()
+        }
         downloads.resumeInterrupted()
         dlog("下载索引恢复完成，任务数 \(downloads.records.count)")
     }

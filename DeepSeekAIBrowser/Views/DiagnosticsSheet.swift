@@ -82,6 +82,11 @@ struct DiagnosticsSheet: View {
             }
             .navigationTitle("诊断日志（\(log.lines.count) 行）")
             .navigationBarTitleDisplayMode(.inline)
+            .task {
+                // 打开面板就顺手 dump 一份 UA / Cookie 统计进日志，
+                // 这样即使还没点下载也能看到下载器手上有什么凭证。
+                _ = await app.browser.downloadContext()
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }

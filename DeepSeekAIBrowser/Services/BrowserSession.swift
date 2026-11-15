@@ -41,6 +41,35 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
     func goBack() { if webView.canGoBack { webView.goBack() } }
     func goForward() { if webView.canGoForward { webView.goForward() } }
 
+    // MARK: - 下载上下文
+
+    /// 把 WebView 真实的 UA 和 Cookie 交给下载器。
+    ///
+    /// 这是必须的：WKWebView 的 Cookie 存在它自己的 WKWebsiteDataStore 里，
+    /// 而 URLSession 用 HTTPCookieStorage.shared，两边完全不通。
+    /// 带 Cookie 的播放器能拿到 200，裸奔的 URLSession 会被 CDN 判 403。
+    func downloadContext() async -> (userAgent: String, cookies: [HTTPCookie]) {
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+
+        let cookies: [HTTPCookie] = await withCheckedContinuation { continuation in
+            store.getAllCookies { list in
+                continuation.resume(returning: list)
+            }
+        }
+
+        var ua = ""
+        if let value = try? await evaluate("navigator.userAgent"), let text = value as? String {
+            ua = text
+        }
+        if ua.isEmpty {
+            ua = webView.value(forKey: "userAgent") as? String ?? ""
+        }
+
+        dlog("下载上下文 UA=\(ua.isEmpty ? "(空)" : ua)")
+        dlog("下载上下文 Cookie 共 \(cookies.count) 个：\(cookies.map { $0.domain }.uniqued().joined(separator: ", "))")
+        return (ua, cookies)
+    }
+
     func evaluate(_ javascript: String) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             webView.evaluateJavaScript(javascript) { value, error in

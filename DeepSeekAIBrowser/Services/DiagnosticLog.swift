@@ -74,3 +74,11 @@ final class DiagnosticLog: ObservableObject {
 func dlog(_ message: String) {
     DiagnosticLog.shared.log(message)
 }
+
+extension Sequence where Element: Hashable {
+    /// 保序去重
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+}

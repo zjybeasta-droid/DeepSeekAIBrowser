@@ -55,6 +55,26 @@ struct HLSWorker {
         var userAgent: String = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         var concurrency: Int = 4
         var maxSegments: Int = 20000
+        /// 从 WKWebView 的 WKWebsiteDataStore 抄过来的 Cookie。
+        /// 不带这些，带防盗链的 CDN 会直接 403。
+        var cookies: [HTTPCookie] = []
+    }
+
+    /// 按目标 URL 过滤出该带的 Cookie，拼成 Cookie 头。
+    /// 域名用后缀匹配（.surrit.com 要能匹配 surrit.com 和子域），路径用前缀匹配。
+    static func cookieHeader(for url: URL, cookies: [HTTPCookie]) -> String {
+        guard let host = url.host?.lowercased() else { return "" }
+        let path = url.path.isEmpty ? "/" : url.path
+        let matched = cookies.filter { cookie in
+            let domain = cookie.domain.lowercased().hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain.lowercased()
+            guard !domain.isEmpty else { return false }
+            let hostMatches = host == domain || host.hasSuffix("." + domain)
+            guard hostMatches else { return false }
+            let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
+            return path.hasPrefix(cookiePath)
+        }
+        guard !matched.isEmpty else { return "" }
+        return matched.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
     struct Outcome {
@@ -302,10 +322,19 @@ struct HLSWorker {
     private func makeRequest(_ url: URL, range: String? = nil) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue(options.userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://\(url.host ?? "")/", forHTTPHeaderField: "Origin")
         request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
         if !options.referer.isEmpty {
             request.setValue(options.referer, forHTTPHeaderField: "Referer")
+            // Origin 必须是页面自己的源，不是 CDN 的源。
+            // 之前写成 CDN 自己，等于告诉服务器"我来自 CDN"，反而更像爬虫。
+            if let origin = URL(string: options.referer), let scheme = origin.scheme, let host = origin.host {
+                request.setValue("\(scheme)://\(host)", forHTTPHeaderField: "Origin")
+            }
+        }
+        let cookie = Self.cookieHeader(for: url, cookies: options.cookies)
+        if !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         if let range { request.setValue(range, forHTTPHeaderField: "Range") }
         return request
@@ -316,8 +345,9 @@ struct HLSWorker {
     private func fetchData(_ url: URL, timeout: UInt64 = 20) async throws -> Data {
         let request = makeRequest(url)
         let referer = options.referer.isEmpty ? "(空)" : options.referer
+        let cookieCount = Self.cookieHeader(for: url, cookies: options.cookies).isEmpty ? 0 : 1
         dlog("GET \(url.absoluteString)")
-        dlog("    Referer=\(referer)")
+        dlog("    Referer=\(referer)  Cookie=\(cookieCount == 1 ? "已带" : "无")")
 
         return try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask { [session] in

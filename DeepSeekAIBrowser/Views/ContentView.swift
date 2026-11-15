@@ -89,6 +89,8 @@ struct ContentView: View {
                 // 记住最后停留的页面：下次冷启动直接回到这里，不再停在测试页
                 UserDefaults.standard.set(newValue, forKey: Self.lastURLKey)
                 if address != newValue { address = newValue }
+                // 换了页面就得重新取 Cookie，否则会拿旧 Cookie 去请求新站点
+                app.downloads.invalidateContext()
             }
         }
     }
