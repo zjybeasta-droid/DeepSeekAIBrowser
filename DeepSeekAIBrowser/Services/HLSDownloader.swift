@@ -363,7 +363,7 @@ struct HLSWorker {
                             keyBytes.baseAddress, key.count,
                             ivBytes.baseAddress,
                             inputBytes.baseAddress, data.count,
-                            outputBytes.baseAddress, output.count,
+                            outputBytes.baseAddress, outputBytes.count,
                             &moved
                         )
                     }
