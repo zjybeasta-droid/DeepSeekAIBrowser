@@ -244,7 +244,8 @@ final class DownloadManager: ObservableObject {
         let worker = HLSWorker(options: HLSWorker.Options(
             referer: record.pageURLString,
             userAgent: context.userAgent.isEmpty ? Self.userAgent : context.userAgent,
-            concurrency: 4,
+            // 3 路并发：实测 4 路时 CDN 会重置连接（Cloudflare 那一层），3 路稳定
+            concurrency: 3,
             cookies: context.cookies
         ))
 
@@ -389,8 +390,17 @@ final class DownloadManager: ObservableObject {
         body(&records[index])
     }
 
+    /// 1875 个分片会产生上千次进度回调，全部推给 SwiftUI 会把主线程拖住。
+    /// 限流到 0.3 秒一次，但状态跃迁和完成消息照常立刻生效。
+    private var lastProgressAt: [UUID: Date] = [:]
+
     private func updateProgress(id: UUID, ratio: Double, message: String) {
         guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        let now = Date()
+        if let last = lastProgressAt[id], now.timeIntervalSince(last) < 0.3 {
+            return
+        }
+        lastProgressAt[id] = now
         records[index].progress = max(0, min(1, ratio))
         records[index].message = message
     }

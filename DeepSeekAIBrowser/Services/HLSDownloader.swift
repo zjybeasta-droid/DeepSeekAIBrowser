@@ -342,12 +342,14 @@ struct HLSWorker {
 
     /// 带硬超时的请求。URLSession 自己的超时在某些网络下不会按时触发，
     /// 这里再抢一个时钟，保证任务不会无限停在"读取播放列表"。
-    private func fetchData(_ url: URL, timeout: UInt64 = 20) async throws -> Data {
+    private func fetchData(_ url: URL, timeout: UInt64 = 20, quiet: Bool = false) async throws -> Data {
         let request = makeRequest(url)
-        let referer = options.referer.isEmpty ? "(空)" : options.referer
-        let cookieCount = Self.cookieHeader(for: url, cookies: options.cookies).isEmpty ? 0 : 1
-        dlog("GET \(url.absoluteString)")
-        dlog("    Referer=\(referer)  Cookie=\(cookieCount == 1 ? "已带" : "无")")
+        if !quiet {
+            let referer = options.referer.isEmpty ? "(空)" : options.referer
+            let hasCookie = Self.cookieHeader(for: url, cookies: options.cookies).isEmpty ? "无" : "已带"
+            dlog("GET \(url.absoluteString)")
+            dlog("    Referer=\(referer)  Cookie=\(hasCookie)")
+        }
 
         return try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask { [session] in
@@ -356,13 +358,15 @@ struct HLSWorker {
                     dlog("    ✗ 没有 HTTP 响应")
                     throw HLSError.badPlaylist("服务器没有返回 HTTP 响应")
                 }
-                let mime = http.value(forHTTPHeaderField: "Content-Type") ?? "(无)"
-                dlog("    ← HTTP \(http.statusCode)  \(data.count) B  \(mime)")
+                if !quiet {
+                    let mime = http.value(forHTTPHeaderField: "Content-Type") ?? "(无)"
+                    dlog("    ← HTTP \(http.statusCode)  \(data.count) B  \(mime)")
+                }
 
                 guard (200..<300).contains(http.statusCode) else {
                     // 把响应体开头打进日志：403 时通常是一段 HTML 说明，能看出是防盗链还是过期
                     let head = String(data: data.prefix(200), encoding: .utf8) ?? ""
-                    dlog("    ✗ 响应体开头: \(head.replacingOccurrences(of: "\n", with: " "))")
+                    dlog("    ✗ HTTP \(http.statusCode) \(url.lastPathComponent) 响应体开头: \(head.replacingOccurrences(of: "\n", with: " "))")
                     let tail = url.absoluteString.count > 90 ? String(url.absoluteString.suffix(90)) : url.absoluteString
                     throw HLSError.unsupported("HTTP \(http.statusCode)（\(tail)）")
                 }
@@ -381,8 +385,12 @@ struct HLSWorker {
         }
     }
 
-    private func fetch(_ url: URL) async throws -> Data {
-        try await fetchData(url)
+    private func fetch(_ url: URL, timeout: UInt64 = 20, quiet: Bool = true) async throws -> Data {
+        try await fetchData(url, timeout: timeout, quiet: quiet)
+    }
+
+    private func fetch(_ url: URL, timeout: UInt64 = 20) async throws -> Data {
+        try await fetchData(url, timeout: timeout)
     }
 
     private func fetchText(_ url: URL) async throws -> String {
@@ -393,6 +401,33 @@ struct HLSWorker {
         return text
     }
 
+    /// 单条请求是否属于"值得重试"的临时故障。
+    /// 1875 个分片的任务里，Cloudflare 掐一两次连接是常态，
+    /// 一次失败就整条任务报废是不可接受的。
+    static func isTransient(_ error: Error) -> Bool {
+        if let hls = error as? HLSError {
+            if case .unsupported(let text) = hls {
+                return text.contains("超时") || text.contains("HTTP 5") || text.contains("HTTP 429")
+            }
+            return false
+        }
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else { return false }
+        switch ns.code {
+        case NSURLErrorNetworkConnectionLost,
+             NSURLErrorTimedOut,
+             NSURLErrorCannotConnectToHost,
+             NSURLErrorNotConnectedToInternet,
+             NSURLErrorSecureConnectionFailed,
+             NSURLErrorCannotFindHost,
+             NSURLErrorHTTPTooManyRedirects,
+             NSURLErrorBadServerResponse:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func fetchSegment(index: Int, media: MediaPlaylist, workDir: URL) async throws {
         let destination = workDir.appendingPathComponent(String(format: "seg_%06d.bin", index))
         if let size = try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? Int,
@@ -401,14 +436,18 @@ struct HLSWorker {
         }
 
         let entry = media.segments[index]
-        var payload = try await fetch(entry.url)
+        var payload = try await withRetry(index: index) {
+            try await self.fetch(entry.url, timeout: 60)
+        }
 
         if let key = entry.key {
             let keyData: Data
             if let cached = keyCache.data(for: key.uri) {
                 keyData = cached
             } else {
-                let fetched = try await fetch(key.uri)
+                let fetched = try await withRetry(index: index, label: "密钥") {
+                    try await self.fetch(key.uri, timeout: 30)
+                }
                 keyCache.store(fetched, for: key.uri)
                 keyData = fetched
             }
@@ -417,6 +456,25 @@ struct HLSWorker {
         }
 
         try payload.write(to: destination, options: .atomic)
+    }
+
+    /// 最多 4 次尝试，退避 1s / 3s / 8s。
+    /// "The network connection was lost" 属于临时故障，重试基本都能过。
+    private func withRetry<T>(index: Int, label: String = "分片", body: () async throws -> T) async throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try await body()
+            } catch {
+                attempt += 1
+                if Task.isCancelled { throw CancellationError() }
+                let transient = Self.isTransient(error)
+                guard transient, attempt < 4 else { throw error }
+                let delay = [1, 3, 8][min(attempt - 1, 2)]
+                dlog("  ↻ \(label)#\(index) 第\(attempt)次失败（\(error.localizedDescription)），\(delay)s 后重试")
+                try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+            }
+        }
     }
 
     /// 没给 IV 时，HLS 规定用分片序号作为 16 字节大端整数。
