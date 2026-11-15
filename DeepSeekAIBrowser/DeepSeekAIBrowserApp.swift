@@ -54,6 +54,11 @@ final class AppModel: ObservableObject {
             guard let self else { return (DownloadManager.userAgent, []) }
             return await self.browser.downloadContext()
         }
+        // 跨域 iframe 播放器：CDN 可能认顶层页面当 Referer，主 Referer 被拒时用它重试
+        downloads.topURLProvider = { [weak self] in
+            guard let self else { return "" }
+            return self.browser.currentURL
+        }
         downloads.resumeInterrupted()
         dlog("下载索引恢复完成，任务数 \(downloads.records.count)")
     }

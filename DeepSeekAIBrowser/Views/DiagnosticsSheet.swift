@@ -44,6 +44,13 @@ struct DiagnosticsSheet: View {
 
                 HStack(spacing: 10) {
                     Button {
+                        Task { _ = await app.browser.probe() }
+                    } label: {
+                        Label("分析页面", systemImage: "magnifyingglass")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button {
                         UIPasteboard.general.string = fullText
                         copied = true
                     } label: {

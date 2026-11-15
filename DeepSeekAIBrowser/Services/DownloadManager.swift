@@ -67,6 +67,9 @@ final class DownloadManager: ObservableObject {
     /// URLSession 和 WKWebView 的 Cookie 存储是两套，不显式搬运就会 403。
     var contextProvider: (() async -> (userAgent: String, cookies: [HTTPCookie]))?
 
+    /// 当前顶层页面地址。跨域 iframe 播放器时，CDN 可能认顶层页当 Referer。
+    var topURLProvider: (() -> String)?
+
     /// 缓存最近一次拿到的上下文，避免每个分片都问一遍 WebView
     private var cachedContext: (userAgent: String, cookies: [HTTPCookie])?
 
@@ -279,8 +282,10 @@ final class DownloadManager: ObservableObject {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let context = await currentContext()
+        let topURL = topURLProvider?() ?? ""
         let worker = HLSWorker(options: HLSWorker.Options(
             referer: record.pageURLString,
+            alternateReferer: topURL,
             userAgent: context.userAgent.isEmpty ? Self.userAgent : context.userAgent,
             // 8 路起步 + 自适应：成功就加到 12，被 CDN 重置就退档，最低 3
             concurrency: 8,
@@ -328,6 +333,10 @@ final class DownloadManager: ObservableObject {
         let chunk: Int64 = 4 * 1024 * 1024
         var total: Int64 = 0
         let context = await currentContext()
+        let topURL = topURLProvider?() ?? ""
+        // 主 Referer 被 403 时换顶层页面再试一次（跨域 iframe 播放器的常见情形）
+        var referer = record.pageURLString
+        var triedAlternate = false
         dlog("直连下载 \(url.absoluteString)")
         dlog("    UA=\(context.userAgent.isEmpty ? "(内置)" : context.userAgent.count > 60 ? "(来自WebView)" : context.userAgent)  Cookie 总数=\(context.cookies.count)")
 
@@ -338,9 +347,9 @@ final class DownloadManager: ObservableObject {
             request.setValue(context.userAgent.isEmpty ? Self.userAgent : context.userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("*/*", forHTTPHeaderField: "Accept")
             request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-            if !record.pageURLString.isEmpty {
-                request.setValue(record.pageURLString, forHTTPHeaderField: "Referer")
-                if let page = URL(string: record.pageURLString), let scheme = page.scheme, let host = page.host {
+            if !referer.isEmpty {
+                request.setValue(referer, forHTTPHeaderField: "Referer")
+                if let page = URL(string: referer), let scheme = page.scheme, let host = page.host {
                     request.setValue("\(scheme)://\(host)", forHTTPHeaderField: "Origin")
                 }
             }
@@ -357,7 +366,15 @@ final class DownloadManager: ObservableObject {
             if http.statusCode == 416 { break }
             guard (200..<300).contains(http.statusCode) else {
                 let head = String(data: data.prefix(200), encoding: .utf8) ?? ""
-                dlog("    ✗ HTTP \(http.statusCode)  响应体开头: \(head.replacingOccurrences(of: "\n", with: " "))")
+                dlog("    ✗ HTTP \(http.statusCode)  响应体开头: \(head)")
+                // 401/403 且还没换过 Referer：换顶层页面再来一次
+                if (http.statusCode == 401 || http.statusCode == 403),
+                   !triedAlternate, !topURL.isEmpty, topURL != referer {
+                    triedAlternate = true
+                    dlog("   ↻ 改用顶层页面 Referer 重试")
+                    referer = topURL
+                    continue
+                }
                 throw HLSError.unsupported("HTTP \(http.statusCode)，可能被防盗链拦住")
             }
 

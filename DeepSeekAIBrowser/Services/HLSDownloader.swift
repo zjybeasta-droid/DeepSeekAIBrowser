@@ -90,6 +90,9 @@ final class AdaptiveLimiter: @unchecked Sendable {
 struct HLSWorker {
     struct Options {
         var referer: String = ""
+        /// 跨域 iframe 播放器很常见：CDN 可能认 iframe 页当 Referer，也可能认顶层页。
+        /// 主 Referer 被 403 时用这个再试一次。
+        var alternateReferer: String = ""
         var userAgent: String = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         var concurrency: Int = 8
         var maxSegments: Int = 20000
@@ -412,16 +415,17 @@ struct HLSWorker {
 
     // MARK: - 网络
 
-    private func makeRequest(_ url: URL, range: String? = nil) -> URLRequest {
+    private func makeRequest(_ url: URL, range: String? = nil, referer override: String? = nil) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue(options.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-        if !options.referer.isEmpty {
-            request.setValue(options.referer, forHTTPHeaderField: "Referer")
+        let referer = override ?? options.referer
+        if !referer.isEmpty {
+            request.setValue(referer, forHTTPHeaderField: "Referer")
             // Origin 必须是页面自己的源，不是 CDN 的源。
             // 之前写成 CDN 自己，等于告诉服务器"我来自 CDN"，反而更像爬虫。
-            if let origin = URL(string: options.referer), let scheme = origin.scheme, let host = origin.host {
+            if let origin = URL(string: referer), let scheme = origin.scheme, let host = origin.host {
                 request.setValue("\(scheme)://\(host)", forHTTPHeaderField: "Origin")
             }
         }
@@ -435,13 +439,32 @@ struct HLSWorker {
 
     /// 带硬超时的请求。URLSession 自己的超时在某些网络下不会按时触发，
     /// 这里再抢一个时钟，保证任务不会无限停在"读取播放列表"。
+    /// 401 / 403 表示"身份或来源不被接受"，是唯一值得换 Referer 重试的情形
+    static func isAuthRejection(_ error: Error) -> Bool {
+        guard let hls = error as? HLSError, case .unsupported(let text) = hls else { return false }
+        return text.contains("HTTP 401") || text.contains("HTTP 403")
+    }
+
     private func fetchData(_ url: URL, timeout: UInt64 = 20, quiet: Bool = false) async throws -> Data {
-        let request = makeRequest(url)
+        do {
+            return try await fetchOnce(url, referer: options.referer, timeout: timeout, quiet: quiet)
+        } catch {
+            let alternate = options.alternateReferer
+            guard !alternate.isEmpty, alternate != options.referer, Self.isAuthRejection(error) else {
+                throw error
+            }
+            if !quiet { dlog("   ↻ 主 Referer 被拒，改用顶层页面 Referer 重试") }
+            return try await fetchOnce(url, referer: alternate, timeout: timeout, quiet: quiet)
+        }
+    }
+
+    private func fetchOnce(_ url: URL, referer: String, timeout: UInt64, quiet: Bool) async throws -> Data {
+        let request = makeRequest(url, referer: referer)
         if !quiet {
-            let referer = options.referer.isEmpty ? "(空)" : options.referer
+            let shown = referer.isEmpty ? "(空)" : referer
             let hasCookie = Self.cookieHeader(for: url, cookies: options.cookies).isEmpty ? "无" : "已带"
             dlog("GET \(url.absoluteString)")
-            dlog("    Referer=\(referer)  Cookie=\(hasCookie)")
+            dlog("    Referer=\(shown)  Cookie=\(hasCookie)")
         }
 
         return try await withThrowingTaskGroup(of: Data.self) { group in

@@ -41,6 +41,70 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
     func goBack() { if webView.canGoBack { webView.goBack() } }
     func goForward() { if webView.canGoForward { webView.goForward() } }
 
+    /// 站点分析：把"这个页面是怎么播放的"一次性问清楚。
+    ///
+    /// 开发机在 Windows，访问不了这些站点，所以只能在设备上做侦察。
+    /// 报告是纯文本，直接进诊断日志，用户截图就等于把现场传出来了。
+    func probe() async -> String {
+        let script = """
+        (() => {
+          const lines = [];
+          const cut = (s, n) => (s || '-').slice(0, n);
+          lines.push('URL: ' + location.href);
+          lines.push('TITLE: ' + cut(document.title, 120));
+          lines.push('READY: ' + document.readyState);
+
+          const vids = Array.from(document.querySelectorAll('video'));
+          lines.push('VIDEO(' + vids.length + ')');
+          vids.slice(0, 5).forEach((v, i) => {
+            lines.push('  [' + i + '] src=' + cut(v.src, 140) +
+                       ' | cur=' + cut(v.currentSrc, 140) +
+                       ' | rs=' + v.readyState +
+                       ' | dur=' + (isFinite(v.duration) ? v.duration.toFixed(1) : '?') +
+                       ' | paused=' + v.paused);
+          });
+
+          const srcs = Array.from(document.querySelectorAll('source'));
+          lines.push('SOURCE(' + srcs.length + ')');
+          srcs.slice(0, 5).forEach((s, i) => lines.push('  [' + i + '] ' + cut(s.src, 140) + ' type=' + cut(s.getAttribute('type'), 40)));
+
+          const frames = Array.from(document.querySelectorAll('iframe'));
+          lines.push('IFRAME(' + frames.length + ')');
+          frames.slice(0, 8).forEach((f, i) => {
+            let host = '';
+            try { host = new URL(f.src, location.href).host; } catch (e) {}
+            lines.push('  [' + i + '] host=' + host + ' | ' + cut(f.src, 150));
+          });
+
+          const scripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
+          const hits = scripts.filter(u => /hls|player|jw|plyr|video|stream|embed|m3u8/i.test(u));
+          lines.push('PLAYER-SCRIPTS(' + hits.length + '/' + scripts.length + ')');
+          hits.slice(0, 8).forEach(u => lines.push('  ' + cut(u, 150)));
+
+          let perf = [];
+          try { perf = performance.getEntriesByType('resource') || []; } catch (e) {}
+          const media = perf.map(e => e.name).filter(u => /\\.(m3u8|mpd|mp4|m4v|webm|mov|flv)(\\?|#|$)/i.test(u));
+          lines.push('PERF-MEDIA(' + media.length + ' / ' + perf.length + ')');
+          media.slice(0, 10).forEach(u => lines.push('  ' + cut(u, 170)));
+
+          const magnets = Array.from(document.querySelectorAll('a[href^="magnet:"]')).length;
+          lines.push('MAGNET-LINKS: ' + magnets);
+
+          return lines.join('\\n');
+        })()
+        """
+        do {
+            let value = try await evaluate(script)
+            let text = (value as? String) ?? "(分析无返回)"
+            dlog("=== 页面分析 ===\n" + text)
+            return text
+        } catch {
+            let message = "分析失败：\(error.localizedDescription)"
+            dlog(message)
+            return message
+        }
+    }
+
     // MARK: - 下载上下文
 
     /// 把 WebView 真实的 UA 和 Cookie 交给下载器。
