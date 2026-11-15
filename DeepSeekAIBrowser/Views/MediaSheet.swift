@@ -4,6 +4,7 @@ struct MediaSheet: View {
     @EnvironmentObject private var app: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showDiagnostics = false
+    @State private var copiedURL = ""
 
     var body: some View {
         NavigationStack {
@@ -88,13 +89,13 @@ struct MediaSheet: View {
                 .lineLimit(2)
 
             HStack(spacing: 8) {
-                Text(candidate.isHLS ? "HLS" : "文件")
+                Text(candidate.isMagnet ? "磁力" : (candidate.isHLS ? "HLS" : "文件"))
                     .font(.caption2)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(candidate.isHLS ? Color.orange.opacity(0.22) : Color.blue.opacity(0.16))
+                    .background(badgeColor(candidate).opacity(0.20))
                     .clipShape(Capsule())
-                Text(candidate.host)
+                Text(candidate.isMagnet ? "BitTorrent" : candidate.host)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -103,16 +104,39 @@ struct MediaSheet: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Button {
-                let page = candidate.page.isEmpty ? app.browser.currentURL : candidate.page
-                app.downloads.enqueue(urlString: candidate.url, pageURLString: page)
-            } label: {
-                Label("下载", systemImage: "arrow.down.circle")
+            if candidate.isMagnet {
+                HStack(spacing: 8) {
+                    Button {
+                        UIPasteboard.general.string = candidate.url
+                        copiedURL = candidate.url
+                    } label: {
+                        Label(copiedURL == candidate.url ? "已复制" : "复制磁力", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Text("iOS 无内置 BT 客户端，需复制到支持磁力的下载工具")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            } else {
+                Button {
+                    let page = candidate.page.isEmpty ? app.browser.currentURL : candidate.page
+                    app.downloads.enqueue(urlString: candidate.url, pageURLString: page)
+                } label: {
+                    Label("下载", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.vertical, 4)
+    }
+
+    private func badgeColor(_ candidate: MediaCandidate) -> Color {
+        if candidate.isMagnet { return .green }
+        return candidate.isHLS ? .orange : .blue
     }
 
     @ViewBuilder

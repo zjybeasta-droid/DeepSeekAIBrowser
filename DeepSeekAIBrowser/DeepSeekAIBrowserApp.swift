@@ -66,9 +66,14 @@ final class AppModel: ObservableObject {
     /// 「下载」按钮的主路径：嗅探器已经拿到地址就直接下。
     /// 没抓到时给明确提示，不再让 AI 去 DOM 里空找 —— 那样只会消耗额度并给出误导结论。
     func smartDownload() async {
-        let candidates = sniffer.candidates
+        // 磁力链接不是可直下的 URL，跳过它，只从真实媒体里挑
+        let candidates = sniffer.candidates.filter { !$0.isMagnet }
         guard let best = candidates.first(where: { $0.isHLS }) ?? candidates.first else {
-            lastAgentMessage = "当前页面还没抓到媒体地址。请先在网页里点一下播放，让它真的开始加载，然后再点下载。"
+            if sniffer.candidates.contains(where: { $0.isMagnet }) {
+                lastAgentMessage = "这一页只有磁力链接，没有可直接下载的流。打开「视频」面板可以复制磁力。"
+            } else {
+                lastAgentMessage = "当前页面还没抓到媒体地址。请先在网页里点一下播放，让它真的开始加载，然后再点下载。"
+            }
             return
         }
         let page = best.page.isEmpty ? browser.currentURL : best.page

@@ -17,15 +17,30 @@ struct MediaCandidate: Identifiable, Codable, Equatable {
 
     var host: String { URL(string: url)?.host ?? "" }
 
+    var isHLS: Bool { kind == "hls" }
+    var isMagnet: Bool { kind == "magnet" }
+
     var displayName: String {
+        if isMagnet {
+            // magnet:?xt=urn:btih:HASH&dn=文件名&tr=...
+            if let range = url.range(of: "dn=") {
+                let rest = url[range.upperBound...]
+                let name = rest.split(separator: "&").first.map(String.init) ?? ""
+                if !name.isEmpty {
+                    return name.removingPercentEncoding ?? name
+                }
+            }
+            if let range = url.range(of: "btih:") {
+                return "磁力 " + url[range.upperBound...].prefix(12) + "…"
+            }
+            return "磁力链接"
+        }
         if let comps = URLComponents(string: url) {
             let last = (comps.path as NSString).lastPathComponent
             if !last.isEmpty { return last }
         }
         return url
     }
-
-    var isHLS: Bool { kind == "hls" }
 }
 
 /// 注入页面脚本，钩住 fetch / XHR / performance / video 元素，
@@ -78,6 +93,22 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
             var s = raw.trim();
             if (!s) { return; }
             if (s.indexOf('blob:') === 0 || s.indexOf('data:') === 0) { return; }
+
+            // 磁力链接：不是可下载的 URL，但用户能复制到别处用
+            if (s.indexOf('magnet:?') === 0) {
+              if (seen[s]) { return; }
+              seen[s] = 1;
+              posted += 1;
+              try {
+                window.webkit.messageHandlers.mediaSniffer.postMessage({
+                  url: s,
+                  kind: 'magnet',
+                  source: source,
+                  page: location.href
+                });
+              } catch (e) {}
+              return;
+            }
 
             // 先做便宜的字符串判断，绝大多数资源在这里就被淘汰，
             // 不再构造 URL 对象 —— 视频页的资源条目能有几千条。
@@ -174,7 +205,27 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
             } catch (e) {}
           }
 
-          function scanAll() { scanPerformance(); scanDom(); }
+          // 5) 磁力链接。这类站点通常每条视频配一个 magnet，
+          //    iOS 上没有 BT 客户端能直接吃，但抓出来能让用户复制到别处。
+          function scanMagnets() {
+            try {
+              var links = document.querySelectorAll('a[href^="magnet:"]');
+              for (var i = 0; i < links.length && i < 20; i++) {
+                post(links[i].getAttribute('href') || links[i].href, 'dom');
+              }
+            } catch (e) {}
+            try {
+              var text = (document.body && document.body.innerText) || '';
+              if (text.indexOf('magnet:') >= 0) {
+                var found = text.match(/magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}[^\s"'<>]*/g);
+                if (found) {
+                  for (var j = 0; j < found.length && j < 10; j++) { post(found[j], 'text'); }
+                }
+              }
+            } catch (e) {}
+          }
+
+          function scanAll() { scanPerformance(); scanDom(); scanMagnets(); }
 
           scanAll();
           setTimeout(scanAll, 700);
