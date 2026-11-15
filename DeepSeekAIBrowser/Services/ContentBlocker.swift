@@ -25,7 +25,7 @@ final class ContentBlocker: ObservableObject {
         let json = Self.loadRulesJSON()
         let identifier = "rules-" + Self.hash(json)
 
-        if let cached = try? await WKContentRuleListStore.default().contentRuleList(withIdentifier: identifier) {
+        if let cached = try? await WKContentRuleListStore.default().contentRuleList(forIdentifier: identifier) {
             list = cached
             isReady = true
             ruleCount = json.components(separatedBy: "\"trigger\"").count - 1
