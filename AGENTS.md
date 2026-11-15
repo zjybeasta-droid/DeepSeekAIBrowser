@@ -81,7 +81,7 @@ scripts/build-simulator.sh           # 只编模拟器，不是正式构建
 
 | 模块 | 状态 |
 |---|---|
-| CI 未签名 IPA 流水线 | ✅ 已通过，8 step 全绿，产物已验 |
+| CI 未签名 IPA 流水线 | ✅ 已通过，工作流 7 个 step 全部 success，产物已验 |
 | project.yml / Bundle ID / Info.plist | ✅ 已修并断言 |
 | 浏览器内核 | 代码已编译通过，未真机验证 |
 | ContentBlocker | ❌ 硬编码 4 条规则，无 `css-display-none`，JSON 未被读取 |
