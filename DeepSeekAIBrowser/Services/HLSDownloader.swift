@@ -140,7 +140,7 @@ struct HLSWorker {
 
     // MARK: - 播放列表
 
-    private struct MediaPlaylist {
+    struct MediaPlaylist {
         var segments: [(url: URL, key: HLSKey?)]
         var initMap: URL?
         var endList: Bool
