@@ -8,6 +8,20 @@ struct MediaSheet: View {
         NavigationStack {
             List {
                 Section {
+                    Toggle("启用媒体嗅探", isOn: Binding(
+                        get: { app.sniffer.isEnabled },
+                        set: { app.sniffer.isEnabled = $0 }
+                    ))
+                    .font(.subheadline)
+
+                    if !app.sniffer.isEnabled {
+                        Text("已关闭。页面会回到完全正常的播放状态，但抓不到下载地址。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section {
                     if app.sniffer.candidates.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("还没抓到媒体地址").font(.subheadline)

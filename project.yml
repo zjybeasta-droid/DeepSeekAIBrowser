@@ -24,8 +24,8 @@ targets:
       path: Support/Info.plist
       properties:
         CFBundleDisplayName: AI浏览器
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.2.1"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

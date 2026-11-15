@@ -30,11 +30,24 @@ struct MediaCandidate: Identifiable, Codable, Equatable {
 
 /// 注入页面脚本，钩住 fetch / XHR / performance / video 元素，
 /// 把发现的可下载媒体通过 WKScriptMessageHandler 回传原生侧。
+///
+/// 性能红线（v0.2.0 踩过）：绝对不要把 .ts / .m4s 分片当成候选。
+/// 一个视频播放会触发几百个分片请求，每个都推到 SwiftUI 会让主线程瘫痪，
+/// 表现就是"视频打不开 / 黑屏 / 一直转圈"。
 final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
     static let handlerName = "mediaSniffer"
-    static let maxItems = 60
+    static let maxItems = 40
+    /// 单个页面最多接收多少条桥消息，超了就停，防止异常站点刷爆
+    static let maxBridgeMessages = 150
 
+    /// 外部开关。关掉后仍会注入脚本，但原生侧不再收集，UI 立刻安静下来。
+    @Published var isEnabled = true
     @Published private(set) var candidates: [MediaCandidate] = []
+
+    private var pending: [MediaCandidate] = []
+    private var knownURLs = Set<String>()
+    private var isFlushScheduled = false
+    private var bridgeMessageCount = 0
 
     // MARK: - 注入脚本
 
@@ -47,7 +60,11 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
           window.__ygSnifferInstalled = true;
 
           var seen = {};
-          var MEDIA_RE = /\.(m3u8|mpd|mp4|m4v|webm|mov|flv|ts)(\?|#|$)/i;
+          var posted = 0;
+          var MAX_POST = 150;
+          // 只认"整份媒体"和播放列表。分片（ts / m4s）、密钥、字幕一律不认。
+          var MEDIA_RE = /\.(m3u8|mpd|mp4|m4v|webm|mov|flv)(\?|#|$)/i;
+          var SEGMENT_RE = /\.(ts|m4s|aac|vtt|key)(\?|#|$)/i;
 
           function kindOf(u) {
             if (/\.m3u8(\?|#|$)/i.test(u)) { return 'hls'; }
@@ -56,16 +73,22 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
           }
 
           function post(raw, source) {
+            if (posted >= MAX_POST) { return; }
             if (!raw || typeof raw !== 'string') { return; }
             var s = raw.trim();
             if (!s) { return; }
             if (s.indexOf('blob:') === 0 || s.indexOf('data:') === 0) { return; }
 
+            // 先做便宜的字符串判断，绝大多数资源在这里就被淘汰，
+            // 不再构造 URL 对象 —— 视频页的资源条目能有几千条。
+            if (SEGMENT_RE.test(s)) { return; }
+            if (!MEDIA_RE.test(s)) { return; }
+
             var abs;
             try { abs = new URL(s, location.href).href; } catch (e) { return; }
-            if (!MEDIA_RE.test(abs)) { return; }
             if (seen[abs]) { return; }
             seen[abs] = 1;
+            posted += 1;
 
             try {
               window.webkit.messageHandlers.mediaSniffer.postMessage({
@@ -77,12 +100,13 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
             } catch (e) {}
           }
 
-          // 1) 已经发生过的网络请求。这是最可靠的一路：
-          //    能捞到脚本注入之前就加载完的流，也能捞到 hls.js 内部的请求。
+          // 1) 已经发生过的网络请求。最可靠的一路：
+          //    能捞到脚本注入之前加载完的流，也能捞到 hls.js 内部的请求。
           function scanPerformance() {
             try {
               var list = performance.getEntriesByType('resource') || [];
-              for (var i = 0; i < list.length; i++) { post(list[i].name, 'perf'); }
+              var start = list.length > 2500 ? list.length - 2500 : 0;
+              for (var i = start; i < list.length; i++) { post(list[i].name, 'perf'); }
             } catch (e) {}
           }
 
@@ -109,7 +133,7 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
             };
           } catch (e) {}
 
-          // 4) DOM 里的 video / source
+          // 4) DOM 里的 video / source（只在扫描时读，不挂 MutationObserver）
           function scanDom() {
             try {
               var els = document.querySelectorAll('video, audio, source');
@@ -117,10 +141,6 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
                 var el = els[i];
                 post(el.src, 'dom');
                 post(el.currentSrc, 'dom');
-                if (el.querySelectorAll) {
-                  var inner = el.querySelectorAll('source');
-                  for (var j = 0; j < inner.length; j++) { post(inner[j].src, 'dom'); }
-                }
               }
             } catch (e) {}
           }
@@ -128,28 +148,19 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
           function scanAll() { scanPerformance(); scanDom(); }
 
           scanAll();
-          setTimeout(scanAll, 600);
-          setTimeout(scanAll, 1800);
-          setTimeout(scanAll, 4000);
-          setTimeout(scanAll, 9000);
+          setTimeout(scanAll, 700);
+          setTimeout(scanAll, 2000);
+          setTimeout(scanAll, 5000);
+          setTimeout(scanAll, 10000);
 
-          // 定时扫 5 分钟就停，避免长期占 CPU
+          // 低速轮询，6 秒一次，最多 60 次（约 6 分钟）后自动停。
+          // v0.2.0 用的 MutationObserver + 4 秒轮询 + .ts 命中，会把主线程拖死。
           var ticks = 0;
           var timer = setInterval(function () {
             ticks += 1;
             scanAll();
-            if (ticks > 75) { clearInterval(timer); }
-          }, 4000);
-
-          try {
-            var observer = new MutationObserver(function () { scanDom(); });
-            observer.observe(document.documentElement || document, {
-              childList: true,
-              subtree: true,
-              attributes: true,
-              attributeFilter: ['src']
-            });
-          } catch (e) {}
+            if (ticks > 60) { clearInterval(timer); }
+          }, 6000);
         })();
         """#
         return WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false)
@@ -158,27 +169,52 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
     // MARK: - 收集
 
     func reset() {
-        DispatchQueue.main.async { self.candidates = [] }
+        DispatchQueue.main.async {
+            self.candidates = []
+            self.pending = []
+            self.knownURLs = []
+            self.bridgeMessageCount = 0
+        }
     }
 
-    func add(_ candidate: MediaCandidate) {
-        if let index = candidates.firstIndex(where: { $0.url == candidate.url }) {
-            // 已知地址，只更新来源，避免列表被同一个流刷屏
-            if candidates[index].source != candidate.source { return }
-            return
-        }
-        candidates.insert(candidate, at: 0)
-        if candidates.count > Self.maxItems {
-            candidates.removeLast(candidates.count - Self.maxItems)
-        }
-        sortCandidates()
+    /// 从桥接线程调度过来，必须在主线程执行。
+    fileprivate func accept(_ candidate: MediaCandidate) {
+        guard isEnabled else { return }
+        guard bridgeMessageCount < Self.maxBridgeMessages else { return }
+        bridgeMessageCount += 1
+
+        if knownURLs.contains(candidate.url) { return }
+        knownURLs.insert(candidate.url)
+        pending.append(candidate)
+        scheduleFlush()
     }
 
-    private func sortCandidates() {
-        candidates.sort { lhs, rhs in
+    /// 关键：桥消息可能每秒来几十条，但 UI 每 0.6 秒最多更新一次。
+    /// 这样 SwiftUI 不会因为持续 @Published 变化而把 WKWebView 拖死。
+    private func scheduleFlush() {
+        guard !isFlushScheduled else { return }
+        isFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.flush()
+        }
+    }
+
+    private func flush() {
+        isFlushScheduled = false
+        guard !pending.isEmpty else { return }
+
+        var merged = candidates
+        merged.append(contentsOf: pending)
+        pending.removeAll()
+
+        merged.sort { lhs, rhs in
             if lhs.isHLS != rhs.isHLS { return lhs.isHLS }
             return lhs.foundAt > rhs.foundAt
         }
+        if merged.count > Self.maxItems {
+            merged.removeLast(merged.count - Self.maxItems)
+        }
+        candidates = merged
     }
 
     /// 给 AI 用的纯文本摘要。有了这段，模型才不会说"页面没有具体链接"。
@@ -203,6 +239,6 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
             source: (body["source"] as? String) ?? "dom",
             page: (body["page"] as? String) ?? ""
         )
-        DispatchQueue.main.async { self.add(candidate) }
+        DispatchQueue.main.async { self.accept(candidate) }
     }
 }
