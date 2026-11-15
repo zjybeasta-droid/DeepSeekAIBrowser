@@ -1,0 +1,19 @@
+name: smoke2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mac-latest:
+    runs-on: macos-latest
+    steps:
+      - run: sw_vers || true
+      - run: echo "macos-latest ok"
+  mac-15:
+    runs-on: macos-15
+    steps:
+      - run: echo "macos-15 ok"
+  mac-14:
+    runs-on: macos-14
+    steps:
+      - run: echo "macos-14 ok"
