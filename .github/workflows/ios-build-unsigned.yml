@@ -1,0 +1,115 @@
+name: iOS Build Unsigned IPA
+
+# 只负责编出未签名的 .ipa。签名在 iPad 上用 SideStore（免费 Apple ID）完成。
+# CI 里不配证书、不配描述文件、不用 --allowProvisioningUpdates。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SCHEME: DeepSeekAIBrowser
+  PROJECT: DeepSeekAIBrowser.xcodeproj
+  CONFIG: Release
+  EXPECTED_BUNDLE_ID: com.yg.aibrowser
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          # info.path 指向 Support/Info.plist，父目录不存在时生成会失败
+          mkdir -p Support
+          xcodegen generate
+          ls -la Support || true
+          # 确认 scheme 真的写进了工程，否则下一步 xcodebuild -scheme 会找不到
+          xcodebuild -list -project "$PROJECT"
+
+      - name: Archive (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIG" \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY=""
+
+      # 静态验证最终产物，而不是只验证 project.yml。
+      # 当前方案用全局 ATS 放开 http 页面和 URLSession 媒体请求，
+      # 因此不能同时声明 NSAllowsArbitraryLoadsInWebContent，否则会改变有效语义。
+      - name: Verify Info.plist
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/App.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          PLIST="$APP/Info.plist"
+          echo "app   = $APP"
+          echo "plist = $PLIST"
+          test -f "$PLIST"
+
+          BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")"
+          echo "bundle id = $BUNDLE_ID"
+          if [ "$BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
+            echo "::error::Bundle ID 是 $BUNDLE_ID，必须是 $EXPECTED_BUNDLE_ID"
+            exit 1
+          fi
+
+          for key in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+            if /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" 2>/dev/null | grep -qi true; then
+              echo "ok   $key"
+            else
+              echo "::error::Info.plist 缺少 $key（下载的文件在「文件」App 里会看不见）"
+              exit 1
+            fi
+          done
+
+          if /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$PLIST" 2>/dev/null | grep -qi true; then
+            echo "ok   NSAllowsArbitraryLoads"
+          else
+            echo "::error::ATS 没有放开，http 页面或 URLSession 媒体请求可能失败"
+            exit 1
+          fi
+
+          if /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoadsInWebContent' "$PLIST" >/dev/null 2>&1; then
+            echo "::error::不能同时声明 NSAllowsArbitraryLoadsInWebContent；当前设计需要全局 ATS 放开 URLSession 的 http 媒体请求"
+            exit 1
+          fi
+
+          echo "ok   background URLSession uses runtime lifecycle handling; UIBackgroundModes is not used as a proxy check"
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/App.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          echo "app = $APP"
+          rm -rf "$RUNNER_TEMP/ipa"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry App-unsigned.ipa Payload
+          test -s App-unsigned.ipa
+          ls -la App-unsigned.ipa
+          du -h App-unsigned.ipa
+          unzip -l App-unsigned.ipa | grep -E 'Payload/[^/]+\.app/' | head -n 3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ipa
+          path: ${{ runner.temp }}/ipa/App-unsigned.ipa
+          retention-days: 30
