@@ -66,9 +66,10 @@ final class DownloadManager: ObservableObject {
 
     init() {
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 3600
-        configuration.waitsForConnectivity = true
+        // 关掉 waitsForConnectivity，否则断网时任务会一直挂着不报错
+        configuration.waitsForConnectivity = false
         configuration.httpMaximumConnectionsPerHost = 6
         session = URLSession(configuration: configuration)
         loadIndex()
@@ -216,10 +217,17 @@ final class DownloadManager: ObservableObject {
             concurrency: 4
         ))
 
-        let outcome = try await worker.download(playlistURL: url, workDir: directory) { ratio, text in
-            Task { @MainActor [weak self] in
-                self?.updateProgress(id: record.id, ratio: ratio, message: text)
+        let outcome: HLSWorker.Outcome
+        do {
+            outcome = try await worker.download(playlistURL: url, workDir: directory) { ratio, text in
+                Task { @MainActor [weak self] in
+                    self?.updateProgress(id: record.id, ratio: ratio, message: text)
+                }
             }
+        } catch {
+            // 把失败的地址尾巴带上，否则用户没法告诉我具体是哪个流出的问题
+            let tail = record.urlString.count > 90 ? String(record.urlString.suffix(90)) : record.urlString
+            throw HLSError.unsupported("\(error.localizedDescription) ← \(tail)")
         }
 
         if !outcome.note.isEmpty {

@@ -8,9 +8,12 @@ struct ContentView: View {
     }
 
     @EnvironmentObject private var app: AppModel
-    @State private var address = "https://www.example.com"
+    @State private var address = ""
     @State private var task = ""
     @State private var activeSheet: ActiveSheet?
+
+    private static let lastURLKey = "browser.lastURL"
+    private static let fallbackURL = "https://m.bing.com"
 
     var body: some View {
         NavigationStack {
@@ -76,7 +79,16 @@ struct ContentView: View {
             .task {
                 await app.blocker.compile()
                 app.blocker.attach(to: app.browser.webView)
+                if address.isEmpty {
+                    address = UserDefaults.standard.string(forKey: Self.lastURLKey) ?? Self.fallbackURL
+                }
                 app.browser.load(address)
+            }
+            .onChange(of: app.browser.currentURL) { _, newValue in
+                guard !newValue.isEmpty else { return }
+                // 记住最后停留的页面：下次冷启动直接回到这里，不再停在测试页
+                UserDefaults.standard.set(newValue, forKey: Self.lastURLKey)
+                if address != newValue { address = newValue }
             }
         }
     }

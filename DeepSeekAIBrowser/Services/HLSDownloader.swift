@@ -71,10 +71,12 @@ struct HLSWorker {
     init(options: Options) {
         self.options = options
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 60
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 40
         configuration.httpMaximumConnectionsPerHost = max(2, options.concurrency + 1)
-        configuration.waitsForConnectivity = true
+        // 不能开 waitsForConnectivity：系统判定"暂时没网"时会一直挂着不报错，
+        // 表现就是任务永远停在"读取播放列表…"。宁可快速失败给出错误。
+        configuration.waitsForConnectivity = false
         self.session = URLSession(configuration: configuration)
     }
 
@@ -290,6 +292,7 @@ struct HLSWorker {
         var request = URLRequest(url: url)
         request.setValue(options.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://\(url.host ?? "")/", forHTTPHeaderField: "Origin")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
         if !options.referer.isEmpty {
             request.setValue(options.referer, forHTTPHeaderField: "Referer")
         }
@@ -297,15 +300,40 @@ struct HLSWorker {
         return request
     }
 
+    /// 带硬超时的请求。URLSession 自己的超时在某些网络下不会按时触发，
+    /// 这里再抢一个时钟，保证任务不会无限停在"读取播放列表"。
+    private func fetchData(_ url: URL, timeout: UInt64 = 20) async throws -> Data {
+        let request = makeRequest(url)
+        return try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask { [session] in
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw HLSError.badPlaylist("服务器没有返回 HTTP 响应")
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    let tail = url.absoluteString.count > 90 ? String(url.absoluteString.suffix(90)) : url.absoluteString
+                    throw HLSError.unsupported("HTTP \(http.statusCode)（\(tail)）")
+                }
+                return data
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeout * 1_000_000_000)
+                throw HLSError.unsupported("请求超时 \(timeout)s，可能被 CDN 拦了或地址已过期")
+            }
+            guard let first = try await group.next() else {
+                throw HLSError.badPlaylist("请求未返回")
+            }
+            group.cancelAll()
+            return first
+        }
+    }
+
     private func fetch(_ url: URL) async throws -> Data {
-        let (data, response) = try await session.data(for: makeRequest(url))
-        guard let http = response as? HTTPURLResponse else { throw HLSError.badPlaylist("无响应") }
-        guard (200..<300).contains(http.statusCode) else { throw HLSError.http(http.statusCode) }
-        return data
+        try await fetchData(url)
     }
 
     private func fetchText(_ url: URL) async throws -> String {
-        let data = try await fetch(url)
+        let data = try await fetchData(url)
         guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
             throw HLSError.badPlaylist("无法解码文本")
         }
