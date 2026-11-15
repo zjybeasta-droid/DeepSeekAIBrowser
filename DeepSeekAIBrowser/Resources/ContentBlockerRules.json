@@ -1,0 +1,5 @@
+[
+  {"trigger":{"url-filter":".*doubleclick.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*googlesyndication.*"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":".*adservice.*"},"action":{"type":"block"}}
+]
