@@ -1,4 +1,4 @@
-name: iOS Build Unsigned IPA
+﻿name: iOS Build Unsigned IPA
 
 # 只负责编出未签名的 .ipa。签名在 iPad 上用 SideStore（免费 Apple ID）完成。
 # CI 里不配证书、不配描述文件、不用 --allowProvisioningUpdates。
@@ -16,7 +16,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15   # macos-14 镜像已下线，任务会立刻 cancelled
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
