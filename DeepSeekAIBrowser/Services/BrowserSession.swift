@@ -37,6 +37,116 @@ final class BrowserSession: NSObject, ObservableObject, WKNavigationDelegate, WK
         controller.addUserScript(sniffer.makeUserScript())
     }
 
+    /// 深度提取：嗅探靠"看它请求了什么"，这里靠"翻它的家底"。
+    ///
+    /// 有些站的播放器把地址藏在 JSON、内联脚本、data-* 属性或 jwplayer/videojs 的
+    /// 运行时对象里，网络还没发出请求就点不动，嗅探等于看不见。这个提取器按
+    /// 台站常见的六种藏法逐个翻，返回 [(地址, 命中位置)]。
+    func deepExtract() async -> [(String, String)] {
+        let body = #"""
+        const found = [];
+        const seen = {};
+        const add = (u, via) => {
+          if (!u || typeof u !== 'string') return;
+          u = u.trim();
+          if (u.length < 12) return;
+          if (!/^(https?:)?\/\//.test(u) && !/^magnet:/.test(u)) return;
+          if (seen[u]) return;
+          seen[u] = 1;
+          found.push({ u: u, via: via });
+        };
+        const grab = (text, via) => {
+          if (!text || typeof text !== 'string') return;
+          const re = /(?:https?:)?\/\/[^"'\\\s<>]+?\.(?:m3u8|mpd|mp4|m4v|webm)(?:\?[^"'\\\s<>]*)?/g;
+          let m; let n = 0;
+          while ((m = re.exec(text)) !== null && n < 40) { add(m[0], via); n++; }
+        };
+
+        // 1) 重新拉一次自己的 HTML，服务端渲染的地址都在里面
+        try {
+          const resp = await fetch(location.href, { credentials: 'include', cache: 'no-store' });
+          if (resp && resp.ok) grab(await resp.text(), 'page-refetch');
+        } catch (e) {}
+
+        // 2) 播放器 DOM 和 data-* 属性
+        document.querySelectorAll('video, source').forEach((el) => {
+          add(el.src, 'dom');
+          add(el.currentSrc, 'dom');
+          add(el.getAttribute('data-src'), 'dom-data');
+        });
+        const attrs = ['data-src', 'data-file', 'data-video', 'data-hls', 'data-mp4', 'data-url', 'data-source'];
+        document.querySelectorAll('[data-src],[data-file],[data-video],[data-hls],[data-mp4],[data-url],[data-source]').forEach((el) => {
+          attrs.forEach((a) => {
+            const v = el.getAttribute(a);
+            if (v && /m3u8|mp4|mpd/i.test(v)) add(v, 'attr:' + a);
+          });
+        });
+
+        // 3) 播放器运行时对象
+        const probe = (fn, via) => {
+          try {
+            const v = fn();
+            if (v) { if (typeof v === 'string') add(v, via); else grab(String(v), via); }
+          } catch (e) {}
+        };
+        probe(() => window.jwplayer && window.jwplayer().getPlaylistItem && window.jwplayer().getPlaylistItem().file, 'jwplayer');
+        probe(() => window.jwplayer && window.jwplayer().getConfig().sources.map((s) => s.file).join(' '), 'jwplayer-sources');
+        probe(() => window.videojs && window.videojs.getAllPlayers && window.videojs.getAllPlayers().map((p) => p.currentSrc()).join(' '), 'videojs');
+        probe(() => window.videoUrl, 'global:videoUrl');
+        probe(() => window.video_url, 'global:video_url');
+        probe(() => window.streamUrl, 'global:streamUrl');
+        probe(() => window.hlsUrl, 'global:hlsUrl');
+        probe(() => window.hls && window.hls.url, 'hls');
+        probe(() => window.player && window.player.src, 'player.src');
+        probe(() => window.player && window.player.config && window.player.config.url, 'player.config');
+        probe(() => {
+          const el = document.querySelector('.dplayer');
+          return el && el.dplayer && el.dplayer.video && el.dplayer.video.src;
+        }, 'dplayer');
+        probe(() => {
+          const el = document.querySelector('video');
+          return el && el.querySelectorAll && Array.from(el.querySelectorAll('source')).map((s) => s.src).join(' ');
+        }, 'video-source');
+
+        // 4) 内联脚本和 JSON 数据块
+        document.querySelectorAll('script:not([src])').forEach((s) => grab(s.textContent, 'inline-script'));
+        ['__NEXT_DATA__', '__NUXT__', 'player-config', 'video-data', 'app'].forEach((id) => {
+          const el = document.getElementById(id);
+          if (el) grab(el.textContent, 'data:' + id);
+        });
+
+        // 5) 整页源码兜底
+        try { grab(document.documentElement.innerHTML.slice(0, 1500000), 'html-source'); } catch (e) {}
+
+        return JSON.stringify(found.slice(0, 80));
+        """#
+
+        do {
+            let value = try await webView.callAsyncJavaScript(body, arguments: [:], in: nil, contentWorld: .page)
+            guard let text = value as? String,
+                  let data = text.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                dlog("深度提取：没有拿到结果")
+                return []
+            }
+            let items: [(String, String)] = raw.compactMap { item in
+                guard let url = item["u"] as? String else { return nil }
+                return (url, item["via"] as? String ?? "?")
+            }
+            dlog("=== 深度提取：\(items.count) 条 ===")
+            for (url, via) in items {
+                dlog("  [\(via)] \(url)")
+            }
+            if items.isEmpty {
+                dlog("  页面里没有明文媒体地址。点一下播放，让它真的开始加载，再试一次。")
+            }
+            return items
+        } catch {
+            dlog("深度提取失败：\(error.localizedDescription)")
+            return []
+        }
+    }
+
     func reload() { webView.reload() }
     func goBack() { if webView.canGoBack { webView.goBack() } }
     func goForward() { if webView.canGoForward { webView.goForward() } }

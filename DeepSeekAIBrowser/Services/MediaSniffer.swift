@@ -270,6 +270,33 @@ final class MediaSniffer: NSObject, ObservableObject, WKScriptMessageHandler {
         scheduleFlush()
     }
 
+    /// 深度提取器挖出来的地址走这里。
+    /// 它绕过了嗅探开关和消息配额 —— 用户明确点了按钮，就该拿到结果。
+    func ingestExternal(url: String, via: String, page: String) {
+        let lowered = url.lowercased()
+        let kind: String
+        if lowered.contains(".m3u8") {
+            kind = "hls"
+        } else if lowered.contains("magnet:") {
+            kind = "magnet"
+        } else {
+            kind = "file"
+        }
+        if knownURLs.contains(url) {
+            dlog("深度提取重复 [\(via)] \(url)")
+            return
+        }
+        knownURLs.insert(url)
+        dlog("深度提取命中 [\(kind)/\(via)] \(url)")
+
+        var merged = candidates
+        merged.insert(MediaCandidate(url: url, kind: kind, source: "提取:\(via)", page: page), at: 0)
+        if merged.count > Self.maxItems {
+            merged.removeLast(merged.count - Self.maxItems)
+        }
+        candidates = merged
+    }
+
     /// 关键：桥消息可能每秒来几十条，但 UI 每 0.6 秒最多更新一次。
     /// 这样 SwiftUI 不会因为持续 @Published 变化而把 WKWebView 拖死。
     private func scheduleFlush() {

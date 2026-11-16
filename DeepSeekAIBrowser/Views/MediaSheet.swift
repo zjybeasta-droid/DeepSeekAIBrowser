@@ -5,6 +5,19 @@ struct MediaSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showDiagnostics = false
     @State private var copiedURL = ""
+    @State private var extracting = false
+
+    /// 深度提取：翻页面源码、内联脚本、data-* 属性、播放器运行时对象。
+    /// 专门对付"嗅探抓不到但页面上明明在播"的站。
+    private func runDeepExtract() async {
+        extracting = true
+        let page = app.browser.currentURL
+        let items = await app.browser.deepExtract()
+        for (url, via) in items {
+            app.sniffer.ingestExternal(url: url, via: via, page: page)
+        }
+        extracting = false
+    }
 
     var body: some View {
         NavigationStack {
@@ -31,6 +44,8 @@ struct MediaSheet: View {
                             视频站的播放器几乎都用 HLS 分片：m3u8 只在网络请求里出现，页面 DOM 中的 video src 是 blob: 假地址。
 
                             所以要先在网页里点一下播放、让分片真的开始加载，嗅探器才拿得到地址。
+
+                            如果点了播放还是没有，按上面的「深度提取」直接翻页面源码和播放器对象。
                             """)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -64,6 +79,14 @@ struct MediaSheet: View {
             .navigationTitle("视频与下载")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        Task { await runDeepExtract() }
+                    } label: {
+                        Label(extracting ? "提取中…" : "深度提取", systemImage: "wand.and.stars")
+                    }
+                    .disabled(extracting)
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         showDiagnostics = true
