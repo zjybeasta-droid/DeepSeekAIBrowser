@@ -1,0 +1,68 @@
+name: fetch-site
+
+# 开发机在受限网络里，很多站点连不上。
+# 这个工作流把 GitHub 的 runner 当抓取代理用：给它一个 URL，
+# 它把 HTML、响应头、媒体地址一起打包成 artifact。
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: page to fetch
+        required: true
+        default: https://www.javrate.com/
+      media_only:
+        description: only extract media urls from an existing page
+        required: false
+        default: "false"
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Fetch page
+        env:
+          TARGET: ${{ inputs.url }}
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          echo "target=$TARGET"
+          curl -sS -L --max-time 90 --compressed \
+            -A "$UA" \
+            -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
+            -H 'Accept-Language: en-US,en;q=0.9' \
+            -D out/headers.txt \
+            -o out/page.html \
+            -w 'status=%{http_code} size=%{size_download} ip=%{remote_ip} final=%{url_effective}\n' \
+            "$TARGET" | tee out/meta.txt
+
+      - name: Extract
+        run: |
+          set -uo pipefail
+          echo "--- bytes ---"; wc -c out/page.html || true
+          echo "--- first 2000 chars ---"; head -c 2000 out/page.html || true
+
+          # 媒体地址：m3u8 / mp4 / mpd，绝对和相对都抓
+          grep -oiE "https?://[^\"' <>\\\\]+\.(m3u8|mp4|mpd|m4v|webm)(\?[^\"' <>\\\\]*)?" out/page.html \
+            | sort -u | head -80 > out/media.txt || true
+
+          # 播放器特征
+          grep -oiE "(m3u8|jwplayer|hls\.js|hlsConfig|video_url|videoUrl|sources|plyr|videojs|dplayer|artplayer|embed|iframe)" out/page.html \
+            | tr 'A-Z' 'a-z' | sort | uniq -c | sort -rn | head -25 > out/hints.txt || true
+
+          # 页面里出现的所有 iframe / script src 主机
+          grep -oiE 'src="[^"]{4,300}"' out/page.html | head -60 > out/srcs.txt || true
+
+          # 视频页链接，方便下一步挑一页深挖
+          grep -oiE 'href="[^"]*(video|watch|v/|javrate)[^"]*"' out/page.html | sort -u | head -40 > out/links.txt || true
+
+          echo "--- media ---"; cat out/media.txt || true
+          echo "--- hints ---"; cat out/hints.txt || true
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-dump
+          path: out/
+          retention-days: 3
