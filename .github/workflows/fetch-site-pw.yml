@@ -1,0 +1,50 @@
+name: fetch-site-pw
+
+# 普通 curl 会被 Cloudflare 的托管挑战挡掉（403 cf-mitigated: challenge）。
+# 这里用真实 Chromium 跑 JS 过挑战，拿到渲染后的 DOM 和完整请求列表。
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: page to open in headless chromium
+        required: true
+        default: https://www.javrate.com/
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install playwright
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i playwright@1.49.1 --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Fetch
+        env:
+          TARGET: ${{ inputs.url }}
+        run: node .github/scripts/fetch.mjs "$TARGET"
+
+      - name: Show summary
+        if: always()
+        run: |
+          echo "===== report ====="
+          cat out/report.txt || true
+          echo "===== media ====="
+          head -40 out/media.txt || true
+          echo "===== api ====="
+          head -40 out/api.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: site-pw
+          path: out/
+          retention-days: 3
