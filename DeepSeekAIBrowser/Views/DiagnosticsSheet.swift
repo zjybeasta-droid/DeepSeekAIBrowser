@@ -51,6 +51,18 @@ struct DiagnosticsSheet: View {
                     .buttonStyle(.borderedProminent)
 
                     Button {
+                        Task {
+                            dlog("=== 网络自检 ===")
+                            for result in await NetCheck.run() {
+                                dlog("  \(result.ok ? "✓" : "✗") \(result.label)：\(result.detail)")
+                            }
+                        }
+                    } label: {
+                        Label("网络自检", systemImage: "wifi")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
                         UIPasteboard.general.string = fullText
                         copied = true
                     } label: {
